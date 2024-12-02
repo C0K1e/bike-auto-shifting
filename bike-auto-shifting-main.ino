@@ -57,8 +57,8 @@ void calibrateActuator();
 void calculateSpeed();
 float calculateCadence();
 void autoShiftGears(unsigned long currentTime);
-void shiftUp();
 void shiftDown();
+void shiftUp();
 
 void setup() {
   Serial.begin(9600); // Initialize serial communication for debugging
@@ -162,14 +162,14 @@ void autoShiftGears(unsigned long currentTime) {
 
   if (newGear != currentGear) {
     if (newGear > currentGear) {
-      shiftDown();
-    } else if (newGear < currentGear) {
       shiftUp();
+    } else if (newGear < currentGear) {
+      shiftDown();
     }
   }
 }
 
-void shiftUp() {
+void shiftDown() {
   if (currentGear > 1) {
     currentGear--;
     actuatorPositionMicros -= pullFactor_micros;
@@ -179,7 +179,7 @@ void shiftUp() {
   }
 }
 
-void shiftDown() {
+void shiftUp() {
   if (currentGear < totalGears) {
     currentGear++;
     actuatorPositionMicros += pullFactor_micros;
