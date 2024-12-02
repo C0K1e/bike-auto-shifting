@@ -23,7 +23,7 @@ const float microsPerMm = (actuatorMaxMicros - actuatorMinMicros) / actuatorStro
 
 // Configurable Parameters
 int chainringTeeth = 42;            // Number of teeth on the chainring (adjustable)
-int cassetteTeeth[] = {11, 13, 15, 17, 19, 22, 25, 28, 32, 32, 36}; // Teeth on cassette sprockets
+int cassetteTeeth[] = {11, 13, 15, 17, 19, 22, 25, 28, 32, 36}; // Teeth on cassette sprockets
 int totalGears = sizeof(cassetteTeeth) / sizeof(cassetteTeeth[0]);  // Total number of gears
 float maxSpeed = 40.0;              // Maximum speed for the highest gear (km/h)
 float pullFactor_mm = 2.8;          // Cable pull per gear shift in mm
@@ -52,7 +52,7 @@ bool isSetupMode = true;                       // Start in Setup Mode by default
 // Function prototypes
 void setLED(int red, int green, int blue);
 void blinkLED(int red, int green, int blue, int times, int delayMs);
-void checkButtonPress();
+void checkSetupButtonPress();
 void calibrateActuator();
 void calculateSpeed();
 float calculateCadence();
@@ -90,7 +90,7 @@ void loop() {
   unsigned long currentTime = millis(); // Get the current time
 
   // Handle button presses for mode switching and status checks
-  checkButtonPress();
+  checkSetupButtonPress();
 
   if (isSetupMode) {
     // Setup Mode: Actuator stays in calibration position
@@ -118,7 +118,7 @@ void loop() {
     Serial.print(" RPM, Gear: ");
     Serial.println(currentGear);
 
-    delay(500);
+    delay(1000);
   }
 }
 
@@ -196,7 +196,7 @@ void calibrateActuator() {
   Serial.println("Calibrating actuator to maximum position.");
 }
 
-void checkButtonPress() {
+void checkSetupButtonPress() {
   int buttonState = digitalRead(calibrateButtonPin);
   if (buttonState == LOW) {
     if (buttonPressStartTime == 0) {
