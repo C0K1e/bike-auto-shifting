@@ -1,4 +1,5 @@
 #include <Servo.h> // Include the Servo library
+#include <float.h> // Für FLT_MAX
 
 // Create a Servo object for the actuator
 Servo actuator;
@@ -29,12 +30,14 @@ float maxSpeed = 40.0;              // Maximum speed for the highest gear (km/h)
 float pullFactor_mm = 2.8;          // Cable pull per gear shift in mm
 float pullFactor_micros = pullFactor_mm * microsPerMm; // Microseconds per gear shift
 float wheelCircumference = 2.6;    // Wheel circumference in meters
+float optimalCadence = 85;           // Optimal Cadence Setup
 
 // Speed and Hall Sensor Variables
 volatile unsigned long lastPulseTime = 0; // Time of the last pulse
 volatile unsigned long pulseInterval = 0; // Time between pulses
 const unsigned long debounceTime = 100000; // Debounce time in microseconds (100 ms)
 float speed = 0;                          // Speed in km/h
+float wheelRPM = 0;                       // Wheel RPM global
 
 // Variables to Track Actuator State
 int currentGear = totalGears;                   // Current gear (starting at the lowest gear)
@@ -56,6 +59,7 @@ void checkSetupButtonPress();
 void calibrateActuator();
 void calculateSpeed();
 float calculateCadence();
+int getOptimalGear(float wheelSpeed, float desiredCadence);
 void autoShiftGears(unsigned long currentTime);
 void shiftDown();
 void shiftUp();
@@ -139,7 +143,7 @@ float calculateCadence() {
   if (speed == 0) return 0;
 
   // Calculate wheel RPM
-  float wheelRPM = (speed * 1000) / (60 * wheelCircumference) / 3.6;
+  wheelRPM = (speed * 1000) / (60 * wheelCircumference) / 3.6;
 
   // Calculate gear ratio based on current gear
   float gearRatio = (float)chainringTeeth / cassetteTeeth[currentGear - 1];
@@ -148,17 +152,40 @@ float calculateCadence() {
   return wheelRPM * gearRatio;
 }
 
+// Funktion, um den optimalen Gang basierend auf Drehgeschwindigkeit und gewünschter Trittfrequenz zu berechnen
+int getOptimalGear(float wheelSpeed, float desiredCadence) {
+  if (wheelSpeed <= 0 || desiredCadence <= 0) {
+    Serial.println("Ungültige Eingaben: Geschwindigkeit oder Trittfrequenz müssen größer als 0 sein.");
+    return currentGear; // Beibehalten des aktuellen Gangs, wenn Eingaben ungültig sind
+  }
+
+  float optimalGearRatio = wheelSpeed / desiredCadence; // Optimales Übersetzungsverhältnis
+  int optimalGear = currentGear;                        // Startwert für den optimalen Gang
+  float smallestDelta = FLT_MAX;                        // Startwert für das kleinste Delta (maximaler Float-Wert)
+
+  // Iteration durch alle Gänge, um das optimale Übersetzungsverhältnis zu finden
+  for (int i = 1; i <= totalGears; i++) {
+    float gearRatio = (float)chainringTeeth / cassetteTeeth[i - 1]; // Übersetzungsverhältnis für den Gang i
+    float delta = fabs(optimalGearRatio - gearRatio);              // Absoluter Unterschied zwischen Ziel und aktuellem Gang
+
+    if (delta < smallestDelta) {
+      smallestDelta = delta;
+      optimalGear = i;
+    }
+  }
+
+  // Ausgabe des optimalen Gangs und des Deltas für Debugging
+  Serial.print("Optimaler Gang: ");
+  Serial.println(optimalGear);
+ 
+  return optimalGear;
+}
+
 // Function to automatically shift gears based on speed
 void autoShiftGears(unsigned long currentTime) {
   int newGear;
 
-  if (speed >= maxSpeed) {
-    newGear = totalGears; // Above maxSpeed, highest gear
-  } else {
-    newGear = map(speed, 0, maxSpeed, 1, totalGears);
-  }
-
-  newGear = constrain(newGear, 1, totalGears);
+  newGear = getOptimalGear(wheelRPM,optimalCadence);
 
   if (newGear != currentGear) {
     if (newGear > currentGear) {
