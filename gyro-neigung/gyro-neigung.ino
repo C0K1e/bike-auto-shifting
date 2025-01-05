@@ -1,65 +1,38 @@
-#include <Wire.h>
-
-// MPU-6050 I2C address
-const int MPU_ADDR = 0x68;
-
-// Accelerometer and Gyroscope raw values
-int16_t accelX, accelY, accelZ;
-int16_t gyroX, gyroY, gyroZ;
-
-// Scaling factors
-const float accelScale = 2.0 / 32768.0;  // For ±2g range
-const float maxTiltDegrees = 45.0;      // Maximum tilt degrees for 100% tilt
+// Pins für die RGB-LED
+const int redPin = 2;   // PWM Pin für Rot
+const int greenPin = 3; // PWM Pin für Grün
+const int bluePin = 4; // PWM Pin für Blau
 
 void setup() {
-  Serial.begin(9600);
-  Wire.begin();
-
-  // Initialize MPU-6050
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x6B); // Power Management 1 register
-  Wire.write(0);    // Wake up MPU-6050
-  Wire.endTransmission(true);
-
-  Serial.println("MPU-6050 Initialized.");
+  // Pins als Ausgang definieren
+  pinMode(redPin, OUTPUT);
+  pinMode(greenPin, OUTPUT);
+  pinMode(bluePin, OUTPUT);
 }
 
 void loop() {
-  float tiltDegrees = getTiltDegrees();
-  float tiltPercentage = (tiltDegrees / maxTiltDegrees) * 100;
-
-  Serial.print("Tilt in Degrees: ");
-  Serial.print(tiltDegrees);
-  Serial.print("°\t");
-
-  Serial.print("Tilt in Percentage: ");
-  Serial.print(tiltPercentage);
-  Serial.println("%");
-
-  delay(1000); // Update every second
+  // Farben abwechselnd anzeigen
+  setColor(255, 0, 0);  // Rot
+  delay(1000);
+  setColor(0, 255, 0);  // Grün
+  delay(1000);
+  setColor(0, 0, 255);  // Blau
+  delay(1000);
+  setColor(255, 255, 0);  // Gelb
+  delay(1000);
+  setColor(0, 255, 255);  // Cyan
+  delay(1000);
+  setColor(255, 0, 255);  // Magenta
+  delay(1000);
+  setColor(255, 255, 255);  // Weiß
+  delay(1000);
+  setColor(0, 0, 0);  // Aus
+  delay(1000);
 }
 
-// Function to calculate tilt angle in degrees
-float getTiltDegrees() {
-  // Request accelerometer and gyroscope data from MPU-6050
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B); // Starting register for accelerometer data
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 14, true);
-
-  // Read accelerometer values
-  accelX = Wire.read() << 8 | Wire.read();
-  accelY = Wire.read() << 8 | Wire.read();
-  accelZ = Wire.read() << 8 | Wire.read();
-  gyroX = Wire.read() << 8 | Wire.read(); // Reading Gyro, even if not used here
-
-  // Convert raw accelerometer data to g
-  float ax = accelX * accelScale;
-  float ay = accelY * accelScale;
-  float az = accelZ * accelScale;
-
-  // Calculate tilt angle in degrees
-  float accelAngle = atan2(ax, sqrt(ay * ay + az * az)) * 180 / PI;
-
-  return accelAngle;
+// Funktion zur Farbsteuerung
+void setColor(int red, int green, int blue) {
+  analogWrite(redPin, red);
+  analogWrite(greenPin, green);
+  analogWrite(bluePin, blue);
 }
