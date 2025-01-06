@@ -9,13 +9,13 @@ Servo actuator;
 const int servoPin = 9;             // Servo control pin connected to pin 9
 const int shiftUpButtonPin = 11;    // Shift up button connected to pin 5
 const int shiftDownButtonPin = 12;  // Shift down button connected to pin 3
-const int calibrateButtonPin = 13;  // Calibration button connected to pin 4
+const int calibrateButtonPin = 2;  // Calibration button connected to pin 4
 const int sensorPin = 3;            // Hall sensor connected to pin 3
 const int analogPinBattery = A0;           // 1) Pin für Spannungsmessung
 
 // RGB LED Pins
-const int redPin = 5;    // Red LED pin
-const int greenPin = 2;  // Green LED pin
+const int redPin = 4;    // Red LED pin
+const int greenPin = 5;  // Green LED pin
 const int bluePin = 6;   // Blue LED pin
 
 // Actuator Specifications
@@ -387,7 +387,7 @@ void calibrateZero() {
     Wire.beginTransmission(MPU_ADDR);
     Wire.write(0x3B); // Starting register for accelerometer data
     Wire.endTransmission(false);
-    Wire.requestFrom(MPU_ADDR, 14, true); // Request 14 bytes (accel + gyro)
+    Wire.requestFrom((uint8_t)0x68, (size_t)14, true); // 14 Bytes (Accel + Gyro)
 
     // Read accelerometer data
     accelX = Wire.read() << 8 | Wire.read();
@@ -447,7 +447,7 @@ float getCurrentTiltPercentage()
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x3B);
   Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 14, true); // 14 Bytes (Accel + Gyro)
+  Wire.requestFrom((uint8_t)0x68, (size_t)14, true); // 14 Bytes (Accel + Gyro)
 
   // 2) Beschleunigungswerte einlesen
   accelX = Wire.read() << 8 | Wire.read();
