@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------
-// AUTOMATIC ELECTRICAL BICICLE SHIFTING CODE
+// AUTOMATIC ELECTRICAL BICYCLE SHIFTING CODE
 // 
 // Copyight by
 // Jasper Bartel
@@ -8,12 +8,10 @@
 // Chat ;)
 // ---------------------------------------------------------------------
 
-
-
-#include <Servo.h>  // Include the Servo library
-#include <float.h>  // Für FLT_MAX
-#include <Wire.h>   // Für Gyro-Auslesen
-#include <math.h>   // Für fabs()
+#include <Servo.h>   // Include the Servo library
+#include <float.h>   // Für FLT_MAX
+#include <Wire.h>    // Für Gyro-Auslesen
+#include <math.h>    // Für fabs()
 
 // ---------------------------------------------------------------------
 // SERVO & HARDWARE
@@ -40,98 +38,109 @@ const float actuatorStroke_mm  = 50.0;   // Total stroke length in mm
 const int   actuatorMaxMicros  = 2000;   // Maximum servo pulse width in microseconds
 const int   actuatorMinMicros  = 1000;   // Minimum servo pulse width in microseconds
 const float microsPerMm        = (actuatorMaxMicros - actuatorMinMicros) / actuatorStroke_mm; 
-const float pullFactor_mm      = 2.8;    // Cable pull per gear shift in mm
-const float pullFactor_micros  = pullFactor_mm * microsPerMm;
 
 // ---------------------------------------------------------------------
-// KASSETTE: Aufsteigend, aber wir interpretieren Gang 1=Index=10!
+// KASSETTE MIT INDIVIDUELLEN PULL-FAKTOREN
 // ---------------------------------------------------------------------
-int cassetteTeeth[] = {11, 13, 15, 17, 19, 22, 25, 28, 32, 36, 42};
-int totalGears      = sizeof(cassetteTeeth) / sizeof(cassetteTeeth[0]);
+struct Gear {
+  int teeth;
+  float pullFactor;  // individueller Pull-Faktor in mm für diesen Gang
+};
+
+// Ritzelzahlen aufsteigend, Pull-Faktor-Apex 1 11-Speed Shifter
+// nach https://drivetrainbuilder.com/SB-APX-B1.htm
+Gear cassette[] = {
+  {11, 3.75},
+  {13, 2.80},
+  {15, 2.78},
+  {17, 2.80},
+  {19, 2.82},
+  {22, 2.84},
+  {25, 2.95},
+  {28, 3.03},
+  {32, 3.03},
+  {36, 3.27},
+  {42, 0.00}
+};
+
+int totalGears = sizeof(cassette) / sizeof(cassette[0]);
 
 // Hilfsfunktionen für Gang <-> Array-Index
 int cassetteIndexForGear(int gear) {
-  // Gang 1 => Index=10 (42 Zähne)
-  // Gang 2 => Index=9  (36 Zähne)
-  // ...
-  // Gang 11 => Index=0 (11 Zähne)
+  // Gang 1 => Index=10 (42 Zähne), ... Gang 11 => Index=0 (11 Zähne)
   int idx = totalGears - gear;
-  if (idx < 0) idx = 0;                          // Sicherheitscheck
-  if (idx >= totalGears) idx = totalGears - 1;   // Sicherheitscheck
+  if (idx < 0) idx = 0;
+  if (idx >= totalGears) idx = totalGears - 1;
   return idx;
 }
 
 int getCassetteTeeth(int gear) {
-  return cassetteTeeth[cassetteIndexForGear(gear)];
+  return cassette[cassetteIndexForGear(gear)].teeth;
+}
+
+float getCassettePullFactor(int gear) {
+  return cassette[cassetteIndexForGear(gear)].pullFactor;
 }
 
 // ---------------------------------------------------------------------
 // PARAMETER
 // ---------------------------------------------------------------------
-float maxSpeed          = 40.0;   // Maximum speed for the highest gear (km/h)
-float wheelCircumference= 2.6;    // Wheel circumference in meters
-float optimalCadence    = 85;     // Optimal Cadence Setup
-float criticalBattery   = 20.0;   // Prozentschwelle für Akkublinken
+float maxSpeed          = 40.0;
+float wheelCircumference= 2.6;
+float optimalCadence    = 85;
+float criticalBattery   = 20.0;
 
-// NEU: Wir wollen mehrere Gänge in einem Schritt wechseln
-const int maxGearJump      = 3;   // Max. Gang-Sprünge pro autoShift
-const int startGearAuto    = 2;   // Beim Wechsel in Auto-Shift diesen Gang anfahren
+const int maxGearJump      = 3;
+const int startGearAuto    = 2;
 
 // ---------------------------------------------------------------------
 // SPEED & HALL SENSOR
 // ---------------------------------------------------------------------
-volatile unsigned long lastPulseTime = 0;    // Time of the last pulse
-volatile unsigned long pulseInterval = 0;    // Time between pulses
-const unsigned long debounceTime      = 100000; // 100ms in us
-float speed = 0;   // Speed in km/h
-float wheelRPM= 0; // Wheel RPM global
+volatile unsigned long lastPulseTime = 0;
+volatile unsigned long pulseInterval = 0;
+const unsigned long debounceTime      = 100000;
+float speed = 0;
+float wheelRPM= 0;
 
 // ---------------------------------------------------------------------
 // AKTUATOR-STATE
 // ---------------------------------------------------------------------
-int currentGear            = totalGears;        // Starte im "höchsten Gang" => Gang=11
-int actuatorPositionMicros = actuatorMinMicros; // Aktuelle Servo-Position
-int startingPositionMicros = actuatorMaxMicros; // Position after pre-tensioning
+int currentGear            = totalGears;
+int actuatorPositionMicros = actuatorMinMicros;
+int startingPositionMicros = actuatorMaxMicros;
 
 // ---------------------------------------------------------------------
 // TIMING & MODES
 // ---------------------------------------------------------------------
-unsigned long gearChangeStartTime = 0;  
-int previousGear           = totalGears;  
-unsigned long buttonPressStartTime = 0;  
-
-bool isSetupMode = true; // Start in Setup Mode
+unsigned long gearChangeStartTime = 0;
+int previousGear           = totalGears;
+unsigned long buttonPressStartTime = 0;
+bool isSetupMode = true;
 
 // ---------------------------------------------------------------------
 // GYRO
 // ---------------------------------------------------------------------
-float tiltPerc;  // Neigung in % (wird in getCurrentTiltPercentage() bestimmt)
+float tiltPerc;
 const int MPU_ADDR = 0x68;
-
 int16_t accelX, accelY, accelZ;
 int16_t gyroX,  gyroY,  gyroZ;
-
-// Calibration constants
-const float accelScale = 2.0 / 32768.0;  
-const float gyroScale  = 250.0 / 32768.0; 
-
-// Tilt angle tracking
+const float accelScale = 2.0 / 32768.0;
+const float gyroScale  = 250.0 / 32768.0;
 float angleX    = 0;
 float baseAngle = 0;
 float gyroDrift = 0;
 unsigned long prevTime;
-
 const float maxTiltDegrees = 45.0; 
-const float alpha          = 0.95;  
+const float alpha          = 0.95;
 
 // ---------------------------------------------------------------------
 // BATTERY
 // ---------------------------------------------------------------------
-float batteryLevel;  
-const float R1 = 10000.0;  
-const float R2 = 15000.0;  
-const float minVoltage = 6.0;   
-const float maxVoltage = 8.4;   
+float batteryLevel;
+const float R1 = 10000.0;
+const float R2 = 15000.0;
+const float minVoltage = 6.0;
+const float maxVoltage = 8.4;
 
 // ---------------------------------------------------------------------
 // FUNKTIONSPROTOTYPEN
@@ -174,15 +183,8 @@ void setup() {
   calibrateActuator();   
   Serial.println("Starting in Setup Mode.");
 
-  // NEU: Sofort in den "höchsten Gang" => Gang=11
-  currentGear = totalGears;  // =11
-  // Position berechnen und setzen
-  int steps = totalGears - 1; // Gang=1 bis Gang=11 -> 10 Schritte
-  // => Wir wollen ja auf Gang=11 => index=0 => kleinstes Ritzel
-  // Da wir laut Vorbelegung currentGear=11 schon haben, 
-  //   (falls du es "physisch" anfahren willst, kannst du es in einer Schleife tun).
-  // Hier zur Sicherheit:
-  actuatorPositionMicros = actuatorMinMicros + (pullFactor_micros * (currentGear - 1));
+  currentGear = totalGears;  
+  actuatorPositionMicros = actuatorMinMicros + (getCassettePullFactor(currentGear) * microsPerMm * (currentGear - 1));
   actuator.writeMicroseconds(actuatorPositionMicros);
   Serial.println("SetupMode: High gear forced (Gang 11, kleinstes Ritzel).");
 }
@@ -192,40 +194,33 @@ void setup() {
 // ---------------------------------------------------------------------
 void loop() {
   unsigned long currentTime = millis();
-  static unsigned long lastBlinkMillis = 0; // static => behält Wert zwischen Durchläufen
+  static unsigned long lastBlinkMillis = 0;
 
   batteryLevel = getBatteryPercentage();
   checkSetupButtonPress();
 
   if (isSetupMode) {
-    // Setup Mode: Bleibe im höchsten Gang (Gang=11) 
-    setLED(255, 0, 0); 
-    // => Keine AutoShift-Funktion
+    setLED(255, 0, 0);
   } 
   else {
-    // Auto Shift Mode
-    setLED(0, 0, 0); 
+    setLED(0, 0, 0);
 
-    // Geschwindigkeits-Timeout
     if ((currentTime - (lastPulseTime / 1000)) > 2000) {
       speed = 0;
     }
 
-    // Batterie-Blinken
     if (batteryLevel < criticalBattery) {
       if (currentTime - lastBlinkMillis >= 2000) {
         lastBlinkMillis = currentTime;
-        blinkLED(255, 130, 0, 1, 500); 
+        blinkLED(255, 130, 0, 1, 500);
       }
     }
 
-    float cadence   = calculateCadence();
-    tiltPerc        = getCurrentTiltPercentage();
+    float cadence = calculateCadence();
+    tiltPerc = getCurrentTiltPercentage();
 
-    // Automatisches Schalten
     autoShiftGears();
 
-    // Debug-Ausgaben
     Serial.print("Batterie-Ladestand: ");
     Serial.print(batteryLevel, 1);
     Serial.println("%");
@@ -262,11 +257,7 @@ void calculateSpeed() {
 // ---------------------------------------------------------------------
 float calculateCadence() {
   if (speed == 0) return 0.0;
-
-  // wheelRPM
   wheelRPM = (speed * 1000.0) / (60.0 * wheelCircumference) / 3.6;
-
-  // Gang => Index => Ritzel
   float gearRatio = (float)chainringTeeth / (float)getCassetteTeeth(currentGear);
   return wheelRPM * gearRatio;
 }
@@ -275,7 +266,6 @@ float calculateCadence() {
 // Optimaler Gang
 // ---------------------------------------------------------------------
 int getOptimalGear(float wheelSpeed, float slopePercent, float desiredCadence) {
-  // Begrenzen
   if (slopePercent > 15.0) slopePercent = 15.0;
   if (slopePercent < -15.0) slopePercent = -15.0;
 
@@ -306,11 +296,10 @@ int getOptimalGear(float wheelSpeed, float slopePercent, float desiredCadence) {
 }
 
 // ---------------------------------------------------------------------
-// NEU: Mehrere Gänge in einem Schritt, limitiert durch maxGearJump
+// MEHRERE GÄNGE IN EINEM SCHRITT
 // ---------------------------------------------------------------------
 void autoShiftGears() {
   int newGear = getOptimalGear(wheelRPM, tiltPerc, optimalCadence);
-
   if (newGear == currentGear) return;
 
   int diff = newGear - currentGear;
@@ -319,12 +308,10 @@ void autoShiftGears() {
   }
 
   if (diff > 0) {
-    // Mehrfach hochschalten
     for (int i = 0; i < diff; i++) {
       shiftUp();
     }
   } else {
-    // Mehrfach runterschalten
     for (int i = 0; i < abs(diff); i++) {
       shiftDown();
     }
@@ -334,26 +321,32 @@ void autoShiftGears() {
 // ---------------------------------------------------------------------
 // SHIFT-FUNKTIONEN
 // ---------------------------------------------------------------------
-void shiftDown() {
-  // Gang verringern => physikalisch größeres Ritzel
-  if (currentGear > 1) {
-    currentGear--;
-    actuatorPositionMicros -= pullFactor_micros;
-    actuator.writeMicroseconds(actuatorPositionMicros);
-    Serial.print("Shifted down to gear ");
-    Serial.println(currentGear);
-  }
-}
-
 void shiftUp() {
-  // Gang erhöhen => physikalisch kleineres Ritzel
+  // Hochschalten: Verwende den Pull-Faktor des aktuellen Gangs,
+  // bevor der Gang erhöht wird.
   if (currentGear < totalGears) {
-    currentGear++;
-    actuatorPositionMicros += pullFactor_micros;
+    float pf = getCassettePullFactor(currentGear);  // Pull-Faktor des aktuellen Gangs
+    currentGear++;  // Gang erhöhen
+    actuatorPositionMicros += pf * microsPerMm;
     actuator.writeMicroseconds(actuatorPositionMicros);
     Serial.print("Shifted up to gear ");
     Serial.println(currentGear);
   }
+  // Wenn currentGear == totalGears (Gang 11), passiert nichts.
+}
+
+void shiftDown() {
+  // Runterschalten: Verwende den Pull-Faktor des Gangs unterhalb des aktuellen.
+  if (currentGear > 1) {
+    int targetGear = currentGear - 1;              // Neuer (niedrigerer) Gang
+    float pf = getCassettePullFactor(targetGear);  // Pull-Faktor des darunterliegenden Gangs
+    currentGear--;  // Gang verringern
+    actuatorPositionMicros -= pf * microsPerMm;
+    actuator.writeMicroseconds(actuatorPositionMicros);
+    Serial.print("Shifted down to gear ");
+    Serial.println(currentGear);
+  }
+  // Wenn currentGear == 1, passiert nichts, da kein Gang darunter existiert.
 }
 
 // ---------------------------------------------------------------------
@@ -376,32 +369,26 @@ void checkSetupButtonPress() {
       buttonPressStartTime = millis();
     } 
     else if (millis() - buttonPressStartTime > 3000) {
-      // Long press => Toggle
       isSetupMode = !isSetupMode;
       buttonPressStartTime = 0;
 
       if (isSetupMode) {
-        // ENTER SETUP
         setLED(255, 0, 0);
         calibrateActuator();
         Serial.println("Entered Setup Mode");
 
-        // => Gang=11
         currentGear = totalGears; 
-        actuatorPositionMicros = actuatorMinMicros + (pullFactor_micros * (currentGear - 1));
+        actuatorPositionMicros = actuatorMinMicros + (getCassettePullFactor(currentGear) * microsPerMm * (currentGear - 1));
         actuator.writeMicroseconds(actuatorPositionMicros);
         Serial.println("SetupMode: Forced highest gear (11).");
       } 
       else {
-        // ENTER AUTO
         blinkLED(0, 255, 0, 3, 300);
         Serial.println("Entered Auto Shift Mode");
 
-        // Beim Wechsel => definierter Startgang
         if (startGearAuto < 1)  return; 
         if (startGearAuto > totalGears) return;
 
-        // Mehrere Steps
         int diff = startGearAuto - currentGear;
         if (diff > 0) {
           for (int i = 0; i < diff; i++) shiftUp();
@@ -412,7 +399,6 @@ void checkSetupButtonPress() {
     }
   } 
   else if (buttonPressStartTime > 0) {
-    // Short press => Status
     if (millis() - buttonPressStartTime < 3000) {
       if (isSetupMode) {
         blinkLED(255, 0, 0, 3, 300);
@@ -537,7 +523,7 @@ float getBatteryPercentage() {
   int rawValue = analogRead(analogPinBattery); 
   float voltageAtPin = (rawValue / 1023.0) * 5.0;
 
-  float dividerFactor = R2 / (R1 + R2); // =0.6
+  float dividerFactor = R2 / (R1 + R2); 
   float batteryVoltage = voltageAtPin / dividerFactor;
 
   float percentage = (batteryVoltage - minVoltage)
