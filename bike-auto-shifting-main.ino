@@ -60,7 +60,7 @@ Gear cassette[] = {
   {28, 3.03},
   {32, 3.03},
   {36, 3.27},
-  {42, 0.00}
+  {42, 0.00} // Kein Pull-Faktor für Gang 11 notwendig
 };
 
 int totalGears = sizeof(cassette) / sizeof(cassette[0]);
@@ -117,6 +117,12 @@ int previousGear           = totalGears;
 unsigned long buttonPressStartTime = 0;
 bool isSetupMode = true;
 
+// Battery Button Check
+unsigned long lastButtonPressTime = 0;   // Zeit der letzten Tastenbetätigung
+unsigned long doubleClickInterval = 500; // Max. Zeit in ms zwischen zwei Klicks für Doppelklick
+bool isWaitingForSecondClick = false;    // Status, ob ein zweiter Klick erwartet wird
+
+
 // ---------------------------------------------------------------------
 // GYRO
 // ---------------------------------------------------------------------
@@ -142,12 +148,14 @@ const float R2 = 15000.0;
 const float minVoltage = 6.0;
 const float maxVoltage = 8.4;
 
+
 // ---------------------------------------------------------------------
 // FUNKTIONSPROTOTYPEN
 // ---------------------------------------------------------------------
 void setLED(int red, int green, int blue);
 void blinkLED(int red, int green, int blue, int times, int delayMs);
 void checkSetupButtonPress();
+void checkBatteryStatus();
 void calibrateActuator();
 void calculateSpeed();
 float calculateCadence();
@@ -362,54 +370,70 @@ void calibrateActuator() {
 // CHECK BUTTON PRESS
 // ---------------------------------------------------------------------
 void checkSetupButtonPress() {
-  int buttonState = digitalRead(calibrateButtonPin);
+    int buttonState = digitalRead(calibrateButtonPin);
 
-  if (buttonState == LOW) {
-    if (buttonPressStartTime == 0) {
-      buttonPressStartTime = millis();
-    } 
-    else if (millis() - buttonPressStartTime > 3000) {
-      isSetupMode = !isSetupMode;
-      buttonPressStartTime = 0;
+    if (buttonState == LOW) {
+        unsigned long currentTime = millis();
 
-      if (isSetupMode) {
-        setLED(255, 0, 0);
-        calibrateActuator();
-        Serial.println("Entered Setup Mode");
-
-        currentGear = totalGears; 
-        actuatorPositionMicros = actuatorMinMicros + (getCassettePullFactor(currentGear) * microsPerMm * (currentGear - 1));
-        actuator.writeMicroseconds(actuatorPositionMicros);
-        Serial.println("SetupMode: Forced highest gear (11).");
-      } 
-      else {
-        blinkLED(0, 255, 0, 3, 300);
-        Serial.println("Entered Auto Shift Mode");
-
-        if (startGearAuto < 1)  return; 
-        if (startGearAuto > totalGears) return;
-
-        int diff = startGearAuto - currentGear;
-        if (diff > 0) {
-          for (int i = 0; i < diff; i++) shiftUp();
-        } else if (diff < 0) {
-          for (int i = 0; i < abs(diff); i++) shiftDown();
+        // Prüfen, ob ein Doppelklick erkannt wurde
+        if (isWaitingForSecondClick && (currentTime - lastButtonPressTime <= doubleClickInterval)) {
+            isWaitingForSecondClick = false;  // Zweiter Klick erkannt
+            Serial.println("Doppelklick erkannt: Akkustand wird überprüft.");
+            checkBatteryStatus();             // Akkustatus prüfen und LED-Signal ausgeben
+        } else {
+            // Erstes Drücken, Doppelklick starten
+            isWaitingForSecondClick = true;
+            lastButtonPressTime = currentTime;
         }
-      }
+    } else if (isWaitingForSecondClick) {
+        // Prüfen, ob Zeit für den zweiten Klick abgelaufen ist
+        if (millis() - lastButtonPressTime > doubleClickInterval) {
+            isWaitingForSecondClick = false; // Warten beenden
+        }
     }
-  } 
-  else if (buttonPressStartTime > 0) {
-    if (millis() - buttonPressStartTime < 3000) {
-      if (isSetupMode) {
-        blinkLED(255, 0, 0, 3, 300);
-        Serial.println("Status: Setup Mode");
-      } else {
-        blinkLED(0, 255, 0, 3, 300);
-        Serial.println("Status: Auto Shift Mode");
-      }
+
+    // Langer Klick für Moduswechsel
+    if (buttonState == LOW && buttonPressStartTime == 0) {
+        buttonPressStartTime = millis();
+    } else if (buttonState == LOW && millis() - buttonPressStartTime > 3000) {
+        isSetupMode = !isSetupMode;
+        buttonPressStartTime = 0;
+
+        if (isSetupMode) {
+            setLED(255, 0, 0);  // Setup-Mode LED
+            calibrateActuator();
+            Serial.println("Entered Setup Mode");
+
+            currentGear = totalGears; 
+            actuatorPositionMicros = actuatorMinMicros + (getCassettePullFactor(currentGear) * microsPerMm * (currentGear - 1));
+            actuator.writeMicroseconds(actuatorPositionMicros);
+            Serial.println("SetupMode: Forced highest gear (11).");
+        } else {
+            blinkLED(0, 255, 0, 3, 300);  // Auto-Mode LED
+            Serial.println("Entered Auto Shift Mode");
+
+            if (startGearAuto < 1)  return; 
+            if (startGearAuto > totalGears) return;
+
+            int diff = startGearAuto - currentGear;
+            if (diff > 0) {
+                for (int i = 0; i < diff; i++) shiftUp();
+            } else if (diff < 0) {
+                for (int i = 0; i < abs(diff); i++) shiftDown();
+            }
+        }
+    } else if (buttonState == HIGH && buttonPressStartTime > 0) {
+        if (millis() - buttonPressStartTime < 3000) {
+            if (isSetupMode) {
+                blinkLED(255, 0, 0, 3, 300);  // Setup Mode Status
+                Serial.println("Status: Setup Mode");
+            } else {
+                blinkLED(0, 255, 0, 3, 300);  // Auto Shift Status
+                Serial.println("Status: Auto Shift Mode");
+            }
+        }
+        buttonPressStartTime = 0;
     }
-    buttonPressStartTime = 0;
-  }
 }
 
 // ---------------------------------------------------------------------
@@ -533,4 +557,25 @@ float getBatteryPercentage() {
   if (percentage > 100.0) percentage = 100.0;
 
   return percentage;
+}
+
+// ---------------------------------------------------------------------
+// CHECK BATTERY STATUS
+// ---------------------------------------------------------------------
+void checkBatteryStatus() {
+    float battery = getBatteryPercentage();
+
+    Serial.print("Akkustand: ");
+    Serial.print(battery, 1);
+    Serial.println("%");
+
+    if (battery >= 20.0 && battery < 45.0) {
+        blinkLED(255, 130, 0, 1, 300); // 1x Orange blinken
+    } else if (battery >= 45.0 && battery < 75.0) {
+        blinkLED(255, 130, 0, 2, 300); // 2x Orange blinken
+    } else if (battery >= 75.0 && battery <= 100.0) {
+        blinkLED(255, 130, 0, 3, 300); // 3x Orange blinken
+    } else if (battery < 20.0) {
+        Serial.println("Kritischer Akkustand!"); // Keine Blinksignale unter 20 %
+    }
 }
