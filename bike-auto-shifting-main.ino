@@ -14,10 +14,12 @@
 // weitere Ausgaben hinzufügen oder entfernen.
 // ---------------------------------------------------------------------
 
-#include <Servo.h>   // Include the Servo library
-#include <float.h>   // Für FLT_MAX
-#include <Wire.h>    // Für Gyro-Auslesen
-#include <math.h>    // Für fabs()
+
+#include <Servo.h>
+#include <float.h>
+#include <Wire.h>
+#include <math.h>
+#include <EEPROM.h>  // Für EEPROM-Speicherung
 
 // ---------------------------------------------------------------------
 // SERVO & HARDWARE
@@ -25,12 +27,12 @@
 Servo actuator;
 
 // Pin Definitions
-const int servoPin           = 9;    // Servo control pin
-const int shiftUpButtonPin   = 11;   // Shift up button
-const int shiftDownButtonPin = 12;   // Shift down button
-const int calibrateButtonPin = 2;    // Calibration button
-const int sensorPin          = 3;    // Hall sensor
-const int analogPinBattery   = A0;   // Pin für Spannungsmessung
+const int servoPin           = 9;
+const int shiftUpButtonPin   = 11;
+const int shiftDownButtonPin = 12;
+const int calibrateButtonPin = 2;
+const int sensorPin          = 3;
+const int analogPinBattery   = A0;
 
 // RGB LED Pins
 const int redPin   = 4;
@@ -40,25 +42,21 @@ const int bluePin  = 6;
 // ---------------------------------------------------------------------
 // AKTUATOR & GANG-KONFIG
 // ---------------------------------------------------------------------
-const float actuatorStroke_mm = 46.0;   // Total stroke length in mm
-const int   actuatorMaxMicros = 2000;   // Maximum servo pulse width in microseconds
-const int   actuatorMinMicros = 1000;   // Minimum servo pulse width in microseconds
-const float microsPerMm       = (actuatorMaxMicros - actuatorMinMicros) / actuatorStroke_mm; 
+const float actuatorStroke_mm = 46.0;
+const int   actuatorMaxMicros = 2000;
+const int   actuatorMinMicros = 1000;
+const float microsPerMm       = (actuatorMaxMicros - actuatorMinMicros) / actuatorStroke_mm;
 
 // ---------------------------------------------------------------------
 // KASSETTE MIT INDIVIDUELLEN PULL-FAKTOREN
 // ---------------------------------------------------------------------
+const int chainringTeeth = 42;
 
-const int chainringTeeth = 42; // Anzahl der Zähne des Kettenblatts (Beispielwert)
-
-// Jeder Eintrag hat: { Ritzel-Zähne, Pull-Faktor in mm }
 struct Gear {
   int teeth;
-  float pullFactor;  // individueller Pull-Faktor in mm für diesen Gang
+  float pullFactor;
 };
 
-// Ritzelzahlen aufsteigend, Pull-Faktor-Apex 1 11-Speed Shifter
-// nach https://drivetrainbuilder.com/SB-APX-B1.htm
 Gear cassette[] = {
   {11, 3.75},
   {13, 2.80},
@@ -70,14 +68,12 @@ Gear cassette[] = {
   {28, 3.03},
   {32, 3.07},
   {36, 3.75},
-  {42, 0.00} // Kein Pull-Faktor für Gang 11 notwendig
+  {42, 0.00}
 };
 
 int totalGears = sizeof(cassette) / sizeof(cassette[0]);
 
-// Hilfsfunktionen für Gang <-> Array-Index
 int cassetteIndexForGear(int gear) {
-  // Gang 1 => Index=10 (42 Zähne), ... Gang 11 => Index=0 (11 Zähne)
   int idx = totalGears - gear;
   if (idx < 0) idx = 0;
   if (idx >= totalGears) idx = totalGears - 1;
@@ -86,7 +82,6 @@ int cassetteIndexForGear(int gear) {
 
 int getCassetteTeeth(int gear) {
   int idx = cassetteIndexForGear(gear);
-  // Debug-Ausgabe
   Serial.print("[getCassetteTeeth] Gear: ");
   Serial.print(gear);
   Serial.print(" => Index: ");
@@ -98,7 +93,6 @@ int getCassetteTeeth(int gear) {
 
 float getCassettePullFactor(int gear) {
   int idx = cassetteIndexForGear(gear);
-  // Debug-Ausgabe
   Serial.print("[getCassettePullFactor] Gear: ");
   Serial.print(gear);
   Serial.print(" => Index: ");
@@ -111,58 +105,61 @@ float getCassettePullFactor(int gear) {
 // ---------------------------------------------------------------------
 // PARAMETER
 // ---------------------------------------------------------------------
-float maxSpeed           = 40.0;   // Nur Referenz, nicht zwingend genutzt
-float wheelCircumference = 2.2;    // Radumfang in Metern (Beispielwert)
-float optimalCadence     = 60;     // Trittfrequenz-Sollwert
-float criticalBattery    = 20.0;   // Unter diesem Wert Warn-Blinken
+float maxSpeed           = 40.0;
+float wheelCircumference = 2.2;  // in Metern
+float optimalCadence     = 60.0; // RPM
+float criticalBattery    = 20.0;
 
-const int maxGearJump   = 3;   // Max. Gänge in einem Schritt
-const int startGearAuto = 2;   // Gang beim Start im Automodus
+const int maxGearJump   = 3;
+const int startGearAuto = 2;
 
 // ---------------------------------------------------------------------
 // SPEED & HALL SENSOR
 // ---------------------------------------------------------------------
 volatile unsigned long lastPulseTime = 0;
 volatile unsigned long pulseInterval = 0;
-const unsigned long debounceTime     = 100000; // in Mikrosekunden
-float speed       = 0;
-float wheelRPM    = 0;
+const unsigned long debounceTime     = 100000; // 100 ms in Microsekunden
+float speed    = 0;
+float wheelRPM = 0;
 
 // ---------------------------------------------------------------------
 // AKTUATOR-STATE
 // ---------------------------------------------------------------------
-int currentGear            = totalGears; // Start im höchsten Gang
-int actuatorPositionMicros = actuatorMinMicros;
-int startingPositionMicros = actuatorMaxMicros; // Nur für Kalibrierung
+// --> Wir wollen letzten Gang aus EEPROM laden:
+const int EEPROM_ADDR_LAST_GEAR = 8;  // int belegt 2 Byte (ggf. 4 Byte, hier aber Standard-Arduino => 2 Byte)
+int currentGear            = 11;  
+int actuatorPositionMicros = 1000;
+int startingPositionMicros = 2000;
 
 // ---------------------------------------------------------------------
 // TIMING & MODES
 // ---------------------------------------------------------------------
 unsigned long gearChangeStartTime   = 0;
-int previousGear                    = totalGears;
+int previousGear                    = 11;
 unsigned long buttonPressStartTime  = 0;
-bool isSetupMode                    = true;
+bool isSetupMode                    = false;  // Standard: Code startet im Setup-Mode
 
 // Battery Button Check
-unsigned long lastButtonPressTime   = 0;   // Zeit der letzten Tastenbetätigung
-unsigned long doubleClickInterval   = 500; // Max. Zeit in ms zwischen zwei Klicks für Doppelklick
+unsigned long lastButtonPressTime   = 0;   
+unsigned long doubleClickInterval   = 500;
 bool isWaitingForSecondClick        = false;    
 
 // ---------------------------------------------------------------------
-// GYRO
+// GYRO / NEIGUNG
 // ---------------------------------------------------------------------
-float tiltPerc;
 const int MPU_ADDR = 0x68;
 int16_t accelX, accelY, accelZ;
 int16_t gyroX,  gyroY,  gyroZ;
-const float accelScale = 2.0 / 32768.0;  // ±2g Bereich
+
+const float accelScale = 2.0 / 32768.0;
 const float gyroScale  = 250.0 / 32768.0; 
-float angleX    = 0;
-float baseAngle = 0;
-float gyroDrift = 0;
+
+float angleX      = 0;     // Akkumulierte Neigung (Pitch)
+float gyroDrift   = 0;     // X-Gyro Drift
 unsigned long prevTime;
+
 const float maxTiltDegrees = 45.0; 
-const float alpha          = 0.95; // Filterfaktor für Gyro/Accel-Fusion
+const float alpha          = 0.95; 
 
 // ---------------------------------------------------------------------
 // BATTERY
@@ -171,7 +168,15 @@ float batteryLevel;
 const float R1        = 10000.0;
 const float R2        = 15000.0;
 const float minVoltage = 6.0;
-const float maxVoltage = 8.4; // Li-Ion mit 2S => max 8.4 V
+const float maxVoltage = 8.4;
+
+// ---------------------------------------------------------------------
+// FORWARD-KALIBRIERUNG
+// ---------------------------------------------------------------------
+// Wir speichern den "Forward-Winkel" direkt in Grad (nicht Bogenmaß),
+// damit wir ihn in getCurrentTiltPercentage() einfach abziehen können.
+const int EEPROM_ADDR_FORWARD_ANGLE = 0;   
+float forwardCalibrationAngleDeg = 0.0;  // in Grad
 
 // ---------------------------------------------------------------------
 // FUNKTIONSPROTOTYPEN
@@ -187,9 +192,29 @@ int   getOptimalGear(float wheelSpeed, float slopePercent, float desiredCadence)
 void  autoShiftGears();
 void  shiftDown();
 void  shiftUp();
-void  calibrateZero();
+
+// Null-Drift-Kalibrierung (Gyro):
+void calibrateZero();
+
+// Neigungsberechnung mit Forward-Korrektur:
 float getCurrentTiltPercentage();
+
+// Akku:
 float getBatteryPercentage();
+void  checkBatteryStatus();
+
+// EEPROM-Helfer:
+void storeEepromFloat(int address, float value);
+float readEepromFloat(int address);
+void storeEepromInt(int address, int value);
+int   readEepromInt(int address);
+
+// Forward-Kalibrierung:
+void calibrateForwardDirection();
+
+// Gang-Position setzen:
+void setActuatorToGear(int gear);
+
 
 // ---------------------------------------------------------------------
 // SETUP
@@ -212,79 +237,97 @@ void setup() {
 
   attachInterrupt(digitalPinToInterrupt(sensorPin), calculateSpeed, FALLING);
 
-  // LED test
+  // 1) Letzten Forward-Winkel aus EEPROM laden
+  forwardCalibrationAngleDeg = readEepromFloat(EEPROM_ADDR_FORWARD_ANGLE);
+  Serial.print("[setup] EEPROM: forwardCalibrationAngleDeg = ");
+  Serial.println(forwardCalibrationAngleDeg, 2);
+
+  // 2) Letzten Gang aus EEPROM laden
+  int lastGear = readEepromInt(EEPROM_ADDR_LAST_GEAR);
+  if (lastGear < 1 || lastGear > totalGears) {
+    lastGear = totalGears; // Fallback: höchster Gang
+  }
+  currentGear = lastGear;
+  
+  // 3) Aktuator direkt auf lastGear fahren
+  setActuatorToGear(currentGear);
+  Serial.print("[setup] Letzter Gang aus EEPROM: ");
+  Serial.println(currentGear);
+
+  // 4) LED-Test
   Serial.println("[setup] LED rot einschalten zur Prüfung.");
   setLED(255, 0, 0); 
   delay(500);
   setLED(0, 0, 0);
 
+  // 5) Gyro-Null kalibrieren (Stillstand)
   Serial.println("[setup] Starte Gyro-Kalibrierung...");
   calibrateZero();       
 
+  // 6) Aktuator-Kalibrierung (mechanisch in Max-Position)
   Serial.println("[setup] Starte Aktuator-Kalibrierung...");
-  calibrateActuator();   
-  Serial.println("Starting in Setup Mode.");
+  calibrateActuator();
 
-  // Gang 11 (kleinstes Ritzel) erzwingen
-  currentGear = totalGears;  
-  float pf = getCassettePullFactor(currentGear);
-  actuatorPositionMicros = actuatorMinMicros + 150 + (pf * microsPerMm * (currentGear - 1));
-  actuator.writeMicroseconds(actuatorPositionMicros);
+  // 7) Setup-Mode aktiv
+  isSetupMode = true;
+  setLED(255, 0, 0); // Rot = Setup
 
-  Serial.print("[setup] Initialer Gang: ");
+  // 8) Im Setup-Modus erzwingen wir Gang 11 (falls gewünscht)
+  //    => Das überschreibt den zuvor gelesenen Gang aus EEPROM!
+  currentGear = totalGears;
+  setActuatorToGear(currentGear);
+  Serial.print("[setup] SetupMode: Force highest gear => ");
   Serial.println(currentGear);
-  Serial.println("SetupMode: High gear forced (Gang 11, kleinstes Ritzel).");
 }
 
 // ---------------------------------------------------------------------
 // LOOP
 // ---------------------------------------------------------------------
 void loop() {
-  unsigned long currentTime = millis();
   static unsigned long lastBlinkMillis = 0;
 
   batteryLevel = getBatteryPercentage();
 
-  // Überprüfe Setup-Button (für Moduswechsel und Akkustand per Doppelklick)
+  // 1) Tasten abfragen
   checkSetupButtonPress();
 
+  // 2) Modus-Logik
   if (isSetupMode) {
-    // Setup Mode => Rote LED als Dauerlicht
-    setLED(255, 0, 0);
+    // Rote LED => "Setup Mode"
+    // Hier passiert nichts Automatisches
   } 
   else {
-    // Auto Shift Mode => LED aus (außer beim Blinken)
+    // Auto Shift Mode => LED aus (oder grün?)
     setLED(0, 0, 0);
 
-    // Falls lange kein Hall-Sensor-Impuls kam, Geschwindigkeit auf 0
-    if ((currentTime - (lastPulseTime / 1000)) > 2000) {
+    // Geschwindigkeit auf 0 setzen, wenn lange kein Puls
+    unsigned long nowMs = millis();
+    if ((nowMs - (lastPulseTime / 1000)) > 2000) {
       speed = 0;
     }
 
-    // Bei niedrigem Akkustand Warn-Blinken
+    // Akku-Warn-Blinken
     if (batteryLevel < criticalBattery) {
-      if (currentTime - lastBlinkMillis >= 2000) {
-        lastBlinkMillis = currentTime;
+      if (nowMs - lastBlinkMillis >= 2000) {
+        lastBlinkMillis = nowMs;
         blinkLED(255, 130, 0, 1, 500); // Orange-Blink
       }
     }
 
-    float cadence = calculateCadence();
-    tiltPerc = getCurrentTiltPercentage();
+    float cadence   = calculateCadence();
+    float tiltPerc  = getCurrentTiltPercentage();
 
     // Automatisches Schalten
     autoShiftGears();
 
     // Debug-Ausgaben
-    Serial.print("[loop] Batterie-Ladestand: ");
+    Serial.print("[loop] Batterie: ");
     Serial.print(batteryLevel, 1);
-    Serial.println("%");
-
-    Serial.print("[loop] Speed: ");
+    Serial.print("%, Speed: ");
     Serial.print(speed);
     Serial.print(" km/h, Cadence: ");
     Serial.print(cadence);
-    Serial.print(" RPM, Neigung: ");
+    Serial.print(" RPM, Tilt: ");
     Serial.print(tiltPerc, 2);
     Serial.print(" %, Gear: ");
     Serial.println(currentGear);
@@ -294,260 +337,73 @@ void loop() {
 }
 
 // ---------------------------------------------------------------------
-// ISR: Geschwindigkeitsberechnung
-// ---------------------------------------------------------------------
-void calculateSpeed() {
-  unsigned long currentTime = micros();
-  if (currentTime - lastPulseTime > debounceTime) {
-    pulseInterval = currentTime - lastPulseTime;
-    lastPulseTime = currentTime;
-    if (pulseInterval > 0) {
-      speed = 3.6 * (wheelCircumference / (pulseInterval / 1e6));
-      // Debug
-      Serial.print("[ISR] pulseInterval: ");
-      Serial.print(pulseInterval);
-      Serial.print(" us => Speed: ");
-      Serial.print(speed);
-      Serial.println(" km/h");
-    }
-  }
-}
-
-// ---------------------------------------------------------------------
-// Trittfrequenz
-// ---------------------------------------------------------------------
-float calculateCadence() {
-  if (speed == 0) return 0.0;
-
-  // Geschw. in m/s
-  float speed_m_s = speed / 3.6; 
-  // Radumdrehungen pro Sekunde
-  float rev_s = speed_m_s / wheelCircumference; 
-  // Radumdrehungen pro Minute
-  wheelRPM = rev_s * 60.0;
-
-  float gearRatio = (float)chainringTeeth / (float)getCassetteTeeth(currentGear);
-
-
-
-  // Debug
-  Serial.print("[calculateCadence] wheelRPM: ");
-  Serial.print(wheelRPM, 2);
-  Serial.print(" => gearRatio: ");
-  Serial.print(gearRatio, 2);
-  Serial.print(" => Cadence: ");
-  Serial.println(wheelRPM * gearRatio, 2);
-
-  return wheelRPM * gearRatio;
-}
-
-// ---------------------------------------------------------------------
-// Optimaler Gang basierend auf Speed, Steigung & gewünschter Cadence
-// ---------------------------------------------------------------------
-int getOptimalGear(float wheelSpeed, float slopePercent, float desiredCadence) {
-  // Begrenze slopePercent für Extremfälle
-  if (slopePercent > 15.0)  slopePercent = 15.0;
-  if (slopePercent < -15.0) slopePercent = -15.0;
-
-  // Pseudo-Anpassung der Cadence an Steigung
-  float adjustedCadence = desiredCadence + slopePercent;
-  if (adjustedCadence < 1.0) adjustedCadence = 1.0;
-
-  // Falls Stillstand oder absurde Eingaben => kein Gangwechsel
-  if (wheelSpeed <= 0 || adjustedCadence <= 0) {
-    Serial.println("[getOptimalGear] Ungültige Eingaben oder Stillstand => Kein Gangwechsel.");
-    return currentGear;
-  }
-
-  float optimalGearRatio = wheelSpeed / adjustedCadence;
-  float smallestDelta     = FLT_MAX;
-  int   optimalGear       = currentGear;
-
-  // Debug
-  Serial.print("[getOptimalGear] wheelSpeed: ");
-  Serial.print(wheelSpeed, 2);
-  Serial.print(" km/h, slopePercent: ");
-  Serial.print(slopePercent, 2);
-  Serial.print("%, desiredCadence: ");
-  Serial.print(desiredCadence, 2);
-  Serial.print(" => adjustedCadence: ");
-  Serial.println(adjustedCadence, 2);
-
-  for (int g = 1; g <= totalGears; g++) {
-    float gearRatio = (float)chainringTeeth / (float)getCassetteTeeth(g);
-    float delta     = fabs(optimalGearRatio - gearRatio);
-    if (delta < smallestDelta) {
-      smallestDelta = delta;
-      optimalGear   = g;
-    }
-  }
-
-  Serial.print("[getOptimalGear] => Optimaler Gang: ");
-  Serial.println(optimalGear);
-  return optimalGear;
-}
-
-// ---------------------------------------------------------------------
-// Mehrere Gänge in einem Schritt (AutoShift)
-// ---------------------------------------------------------------------
-void autoShiftGears() {
-  int newGear = getOptimalGear(wheelRPM, tiltPerc, optimalCadence);
-  if (newGear == currentGear) {
-    // Debug
-    //Serial.println("[autoShiftGears] Kein Gangwechsel nötig.");
-    return;
-  }
-
-  int diff = newGear - currentGear;
-  // Debug
-  Serial.print("[autoShiftGears] CurrentGear: ");
-  Serial.print(currentGear);
-  Serial.print(", NewGear: ");
-  Serial.print(newGear);
-  Serial.print(", Diff: ");
-  Serial.println(diff);
-
-  if (abs(diff) > maxGearJump) {
-    diff = (diff > 0) ? maxGearJump : -maxGearJump;
-    Serial.print("[autoShiftGears] Diff größer als maxGearJump => gekürzt auf: ");
-    Serial.println(diff);
-  }
-
-  if (diff > 0) {
-    for (int i = 0; i < diff; i++) {
-      shiftUp();
-    }
-  } else {
-    for (int i = 0; i < abs(diff); i++) {
-      shiftDown();
-    }
-  }
-}
-
-// ---------------------------------------------------------------------
-// SHIFT-FUNKTIONEN
-// ---------------------------------------------------------------------
-void shiftUp() {
-  if (currentGear < totalGears) {
-    // Pull-Faktor vom aktuellen Gang
-    float pf = getCassettePullFactor(currentGear);
-    currentGear++;
-    actuatorPositionMicros += pf * microsPerMm;
-    actuator.writeMicroseconds(actuatorPositionMicros);
-
-    delay (300);
-
-    Serial.print("[shiftUp] Shifted up to gear ");
-    Serial.print(currentGear);
-    Serial.print(" => Neuer actuatorPositionMicros: ");
-    Serial.println(actuatorPositionMicros);
-  } else {
-    Serial.println("[shiftUp] Bereits im höchsten Gang. Keine Aktion.");
-  }
-}
-
-void shiftDown() {
-  if (currentGear > 1) {
-    int targetGear = currentGear - 1;
-    // Pull-Faktor für den darunterliegenden Gang
-    float pf = getCassettePullFactor(targetGear);
-    currentGear--;
-    actuatorPositionMicros -= pf * microsPerMm;
-    actuator.writeMicroseconds(actuatorPositionMicros);
-
-    delay (300);
-
-    Serial.print("[shiftDown] Shifted down to gear ");
-    Serial.print(currentGear);
-    Serial.print(" => Neuer actuatorPositionMicros: ");
-    Serial.println(actuatorPositionMicros);
-  } else {
-    Serial.println("[shiftDown] Bereits im niedrigsten Gang. Keine Aktion.");
-  }
-}
-
-// ---------------------------------------------------------------------
-// SETUP-MODE: Kalibrierung des Aktuators
-// ---------------------------------------------------------------------
-void calibrateActuator() {
-  actuatorPositionMicros = actuatorMaxMicros;
-  actuator.writeMicroseconds(actuatorPositionMicros);
-  Serial.println("[calibrateActuator] Aktuator in maximale Position gefahren.");
-}
-
-// ---------------------------------------------------------------------
-// CHECK BUTTON PRESS (Moduswechsel, Doppelklick => Akku-Abfrage)
+// CHECK BUTTON PRESS (Kurz/Lang, Doppelklick)
 // ---------------------------------------------------------------------
 void checkSetupButtonPress() {
   int buttonState = digitalRead(calibrateButtonPin);
 
+  // Doppelklick => Akkustatus
   if (buttonState == LOW) {
     unsigned long currentTime = millis();
-
-    // Prüfen, ob ein Doppelklick erkannt wurde
     if (isWaitingForSecondClick && (currentTime - lastButtonPressTime <= doubleClickInterval)) {
-      // Zweiter Klick erkannt
       isWaitingForSecondClick = false;  
-      Serial.println("[checkSetupButtonPress] Doppelklick erkannt => Akkustatus wird geprüft.");
+      Serial.println("[checkSetupButtonPress] Doppelklick => Akku-Check");
       checkBatteryStatus();             
     } else {
-      // Erstes Drücken, Doppelklick-Phase starten
       isWaitingForSecondClick = true;
       lastButtonPressTime = currentTime;
     }
   } else if (isWaitingForSecondClick) {
-    // Prüfen, ob Zeit für den zweiten Klick abgelaufen ist
     if (millis() - lastButtonPressTime > doubleClickInterval) {
-      // Zeit überschritten, kein Doppelklick
       isWaitingForSecondClick = false;
     }
   }
 
-  // Langer Klick für Moduswechsel
+  // Langer Klick => Moduswechsel Setup <-> AutoShift
   if (buttonState == LOW && buttonPressStartTime == 0) {
-    // Starte Timer
     buttonPressStartTime = millis();
   } 
   else if (buttonState == LOW && millis() - buttonPressStartTime > 3000) {
-    // Moduswechsel
+    // Modus umschalten
     isSetupMode = !isSetupMode;
     buttonPressStartTime = 0;
 
     if (isSetupMode) {
-      setLED(255, 0, 0);  // Setup-Mode LED
-      calibrateActuator();
-      Serial.println("[checkSetupButtonPress] Setup Mode aktiviert.");
+      setLED(255, 0, 0);
+      Serial.println("[checkSetupButtonPress] Wechsel in Setup Mode");
 
-      currentGear = totalGears; 
-      float pf = getCassettePullFactor(currentGear);
-      actuatorPositionMicros = actuatorMinMicros + (pf * microsPerMm * (currentGear - 1));
-      actuator.writeMicroseconds(actuatorPositionMicros);
-      Serial.println("[checkSetupButtonPress] SetupMode: Forced highest gear (11).");
+      // Gang 11 erzwingen
+      currentGear = totalGears;
+      setActuatorToGear(currentGear);
+      Serial.println("[checkSetupButtonPress] Forced highest gear (11)");
+
     } else {
-      blinkLED(0, 255, 0, 3, 300);  // Auto-Mode LED
-      Serial.println("[checkSetupButtonPress] Auto Shift Mode aktiviert.");
+      blinkLED(0, 255, 0, 3, 300);
+      Serial.println("[checkSetupButtonPress] Wechsel in Auto Shift Mode");
 
-      // Beim Wechsel in den Auto-Modus ggf. auf startGearAuto schalten
-      if (startGearAuto < 1)  return; 
-      if (startGearAuto > totalGears) return;
-
-      int diff = startGearAuto - currentGear;
-      if (diff > 0) {
-        for (int i = 0; i < diff; i++) shiftUp();
-      } else if (diff < 0) {
-        for (int i = 0; i < abs(diff); i++) shiftDown();
+      // Start-Gang erzwingen
+      if (startGearAuto >= 1 && startGearAuto <= totalGears) {
+        int diff = startGearAuto - currentGear;
+        if (diff > 0) {
+          for (int i = 0; i < diff; i++) shiftUp();
+        } else if (diff < 0) {
+          for (int i = 0; i < abs(diff); i++) shiftDown();
+        }
       }
     }
   } 
   else if (buttonState == HIGH && buttonPressStartTime > 0) {
-    // Kurzer Klick => Statusblinken
-    if (millis() - buttonPressStartTime < 3000) {
+    unsigned long pressDuration = millis() - buttonPressStartTime;
+    if (pressDuration < 3000) {
+      // Kurzer Klick
       if (isSetupMode) {
-        blinkLED(255, 0, 0, 3, 300);  // Setup Mode Status
-        Serial.println("[checkSetupButtonPress] Status: Setup Mode");
+        // => Forward-Kalibrierung starten (inkl. Gyro-Neukalibrierung)
+        Serial.println("[checkSetupButtonPress] Kurzer Klick im Setup Mode => calibrateForwardDirection()");
+        calibrateForwardDirection();
       } else {
-        blinkLED(0, 255, 0, 3, 300);  // Auto Shift Status
-        Serial.println("[checkSetupButtonPress] Status: Auto Shift Mode");
+        // Im Auto-Shift-Mode => LED Blink => Status
+        blinkLED(0, 255, 0, 3, 300); 
+        Serial.println("[checkSetupButtonPress] Status: Auto Shift Mode (kurzer Klick).");
       }
     }
     buttonPressStartTime = 0;
@@ -555,82 +411,132 @@ void checkSetupButtonPress() {
 }
 
 // ---------------------------------------------------------------------
-// LED-Steuerung
+// FORWARD-KALIBRIERUNG: 5s Countdown + Gyro-Drift + 5s Schieben
 // ---------------------------------------------------------------------
-void setLED(int red, int green, int blue) {
-  analogWrite(redPin,   red);
-  analogWrite(greenPin, green);
-  analogWrite(bluePin,  blue);
-}
-
-void blinkLED(int red, int green, int blue, int times, int delayMs) {
-  for (int i = 0; i < times; i++) {
-    setLED(red, green, blue);
-    delay(delayMs);
+void calibrateForwardDirection() {
+  // 1) 5× Blinken blau (1s pro Blink) => Countdown
+  //    => Zeit, das Rad still hinzustellen
+  Serial.println("[calibrateForwardDirection] Countdown 5s (Blink blau)...");
+  for (int i = 0; i < 5; i++) {
+    setLED(0, 0, 255);
+    delay(500);
     setLED(0, 0, 0);
-    delay(delayMs);
+    delay(500);
   }
+
+  // 2) Jetzt Gyro-Neukalibrierung (Sensor ruhig halten!)
+  Serial.println("[calibrateForwardDirection] Jetzt Gyro-Neukalibrierung (Sensor still)...");
+  setLED(0, 0, 255); // Dauern blau
+  calibrateZero();
+
+  // 3) 5s Vorwärts-Schieben => wir messen Mittelwert von (ax, ay)
+  Serial.println("[calibrateForwardDirection] Bitte Fahrrad 5 Sekunden vorwärts schieben...");
+  unsigned long startMs = millis();
+  float sumAx = 0.0;
+  float sumAy = 0.0;
+  int samples = 0;
+
+  while (millis() - startMs < 5000) {
+    // Beschleunigung lesen
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x3B);
+    Wire.endTransmission(false);
+    Wire.requestFrom((uint8_t)MPU_ADDR, (size_t)14, true);
+
+    int16_t axRaw = Wire.read() << 8 | Wire.read();
+    int16_t ayRaw = Wire.read() << 8 | Wire.read();
+    int16_t azRaw = Wire.read() << 8 | Wire.read();
+
+    int16_t gxRaw = Wire.read() << 8 | Wire.read();
+    int16_t gyRaw = Wire.read() << 8 | Wire.read();
+    int16_t gzRaw = Wire.read() << 8 | Wire.read();
+
+    float ax = axRaw * accelScale;
+    float ay = ayRaw * accelScale;
+    // float az = azRaw * accelScale; // nicht verwendet
+
+    sumAx += ax;
+    sumAy += ay;
+    samples++;
+
+    delay(50); // ~20Hz Abtastrate
+  }
+
+  // 4) Durchschnitt berechnen => Winkel in Grad
+  if (samples > 0) {
+    float avgAx = sumAx / samples;
+    float avgAy = sumAy / samples;
+
+    // atan2(ay, ax) => Winkel in XY-Ebene
+    float angleRad = atan2(avgAy, avgAx);
+    float angleDeg = angleRad * 180.0 / M_PI;
+
+    forwardCalibrationAngleDeg = angleDeg;
+    storeEepromFloat(EEPROM_ADDR_FORWARD_ANGLE, forwardCalibrationAngleDeg);
+
+    Serial.print("[calibrateForwardDirection] Kalibrierung beendet. Vorwärtswinkel = ");
+    Serial.print(angleDeg, 2);
+    Serial.println("° (EEPROM gespeichert)");
+  }
+
+  // 5) LED aus, zurück in Setup
+  setLED(255, 0, 0); 
+  Serial.println("[calibrateForwardDirection] Zurück in Setup Mode.");
 }
 
 // ---------------------------------------------------------------------
-// GYRO-Kalibrierung (Null-Lage bestimmen & Gyro-Drift ermitteln)
+// GYRO-NULL-KALIBRIERUNG
 // ---------------------------------------------------------------------
 void calibrateZero() {
-  Serial.println("[calibrateZero] Starte Kalibrierung. Bitte Sensor ruhig halten.");
+  // Wir setzen angleX = 0, ermitteln den Gyro-Drift
+  // => Dann liegt "Flach" bei angleX=0
+  // (baseAngle entfällt, wir nutzen forwardCalibrationAngleDeg für Korrektur)
+  Serial.println("[calibrateZero] Starte Null-Kalibrierung (Gyro-Drift). Bitte stillhalten...");
 
-  float sumAccelAngle = 0;
-  float sumGyro       = 0;
+  float sumGyro = 0;
   const int sampleCount = 200;
 
   Wire.begin();
   Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x6B);  // PWR_MGMT_1
-  Wire.write(0);     // MPU aktivieren
+  Wire.write(0x6B);
+  Wire.write(0);
   Wire.endTransmission(true);
 
+  // Gyro-Integration
   for (int i = 0; i < sampleCount; i++) {
     Wire.beginTransmission(MPU_ADDR);
     Wire.write(0x3B);
     Wire.endTransmission(false);
     Wire.requestFrom((uint8_t)MPU_ADDR, (size_t)14, true);
 
-    accelX = Wire.read() << 8 | Wire.read();
-    accelY = Wire.read() << 8 | Wire.read();
-    accelZ = Wire.read() << 8 | Wire.read();
+    int16_t axRaw = Wire.read() << 8 | Wire.read(); 
+    int16_t ayRaw = Wire.read() << 8 | Wire.read(); 
+    int16_t azRaw = Wire.read() << 8 | Wire.read();
 
-    gyroX  = Wire.read() << 8 | Wire.read();
-    gyroY  = Wire.read() << 8 | Wire.read();
-    gyroZ  = Wire.read() << 8 | Wire.read();
+    int16_t gxRaw = Wire.read() << 8 | Wire.read();
+    int16_t gyRaw = Wire.read() << 8 | Wire.read();
+    int16_t gzRaw = Wire.read() << 8 | Wire.read();
 
-    float ax = accelX * accelScale;
-    float ay = accelY * accelScale;
-    float az = accelZ * accelScale;
-
-    float accelAngle = atan2(ax, sqrt(ay*ay + az*az)) * 180.0 / PI;
-
-    sumAccelAngle += accelAngle;
-    sumGyro       += (gyroX * gyroScale);
+    // Summiere nur GyroX (Pitch)
+    sumGyro += (gxRaw * gyroScale);
 
     delay(5);
   }
 
-  baseAngle = sumAccelAngle / sampleCount;
   gyroDrift = sumGyro / sampleCount;
-  angleX    = baseAngle;
+  angleX    = 0;  // Reset angleX
 
-  Serial.print("[calibrateZero] Calibration complete. Zero angle = ");
-  Serial.print(baseAngle, 2);
-  Serial.print("°, Gyro drift = ");
-  Serial.print(gyroDrift, 2);
-  Serial.println("°/s");
-
+  Serial.print("[calibrateZero] GyroDrift: ");
+  Serial.print(gyroDrift, 3);
+  Serial.println("°/s, angleX auf 0 gesetzt.");
   prevTime = millis();
 }
 
 // ---------------------------------------------------------------------
-// AKTUELLE NEIGUNG AUS GYRO+ACCEL
+// NEIGUNG BERECHNEN (in %), inkl. Forward-Korrektur
 // ---------------------------------------------------------------------
 float getCurrentTiltPercentage() {
+  // 1) Sensor lesen
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x3B);
   Wire.endTransmission(false);
@@ -649,31 +555,41 @@ float getCurrentTiltPercentage() {
   float az = accelZ * accelScale;
   float gx = (gyroX * gyroScale) - gyroDrift;
 
+  // 2) Delta-Zeit
   unsigned long currentTime = millis();
   float deltaTime = (currentTime - prevTime) / 1000.0;
   prevTime = currentTime;
 
-  float accelAngle = atan2(ax, sqrt(ay*ay + az*az)) * 180.0 / PI;
+  // 3) Accelerometer Pitch (in Grad)
+  //    Hier: positiver Winkel => Vorderrad nach oben
+  //    Falls umgekehrt gewünscht, kann man angle * -1 machen
+  float accelAngleDeg = atan2(ax, sqrt(ay*ay + az*az)) * 180.0 / M_PI;
 
-  // Gyro-Integration
-  angleX += gx * deltaTime;
-  // Komplementärfilter
-  angleX = alpha * angleX + (1.0 - alpha) * accelAngle;
+  // 4) Gyro-Integration
+  angleX += gx * deltaTime; // Add deg/s * s => deg
 
-  float relativeAngle = angleX - baseAngle;
-  if (relativeAngle >  maxTiltDegrees) relativeAngle =  maxTiltDegrees;
-  if (relativeAngle < -maxTiltDegrees) relativeAngle = -maxTiltDegrees;
+  // 5) Komplementärfilter
+  angleX = alpha * angleX + (1.0 - alpha) * accelAngleDeg;
 
-  float tiltPercentage = (relativeAngle / maxTiltDegrees) * 100.0;
+  // 6) Forward-Korrektur:
+  //    => Wir ziehen den Vorwärts-Kalibrierwinkel ab.
+  //    => Ist forwardCalibrationAngleDeg hoch => man war geneigt.
+  float correctedAngle = angleX - forwardCalibrationAngleDeg;
+
+  // 7) Werte begrenzen
+  if (correctedAngle >  maxTiltDegrees)  correctedAngle =  maxTiltDegrees;
+  if (correctedAngle < -maxTiltDegrees)  correctedAngle = -maxTiltDegrees;
+
+  float tiltPercentage = (correctedAngle / maxTiltDegrees) * 100.0;
 
   // Debug
-  Serial.print("[getCurrentTiltPercentage] angleX: ");
+  Serial.print("[getCurrentTiltPercentage] angleX=");
   Serial.print(angleX, 2);
-  Serial.print("°, baseAngle: ");
-  Serial.print(baseAngle, 2);
-  Serial.print("°, relativeAngle: ");
-  Serial.print(relativeAngle, 2);
-  Serial.print("° => tiltPercentage: ");
+  Serial.print("°, forwardOffset=");
+  Serial.print(forwardCalibrationAngleDeg, 2);
+  Serial.print(" => correctedAngle=");
+  Serial.print(correctedAngle, 2);
+  Serial.print(" => tiltPerc=");
   Serial.print(tiltPercentage, 2);
   Serial.println("%");
 
@@ -681,7 +597,230 @@ float getCurrentTiltPercentage() {
 }
 
 // ---------------------------------------------------------------------
-// AKKUSTAND ERMITTELN
+// SPEED-BERECHNUNG (ISR)
+// ---------------------------------------------------------------------
+void calculateSpeed() {
+  unsigned long currentTime = micros();
+  if (currentTime - lastPulseTime > debounceTime) {
+    pulseInterval = currentTime - lastPulseTime;
+    lastPulseTime = currentTime;
+    if (pulseInterval > 0) {
+      speed = 3.6 * (wheelCircumference / (pulseInterval / 1e6));
+      Serial.print("[ISR] pulseInterval: ");
+      Serial.print(pulseInterval);
+      Serial.print(" us => Speed: ");
+      Serial.print(speed);
+      Serial.println(" km/h");
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// TRITTFREQUENZ
+// ---------------------------------------------------------------------
+float calculateCadence() {
+  if (speed == 0) return 0.0;
+
+  float speed_m_s = speed / 3.6; 
+  float rev_s = speed_m_s / wheelCircumference; 
+  wheelRPM = rev_s * 60.0;
+
+  float gearRatio = (float)chainringTeeth / (float)getCassetteTeeth(currentGear);
+
+  float cadence = wheelRPM * gearRatio;
+  Serial.print("[calculateCadence] wheelRPM=");
+  Serial.print(wheelRPM, 2);
+  Serial.print(", gearRatio=");
+  Serial.print(gearRatio, 2);
+  Serial.print(", Cadence=");
+  Serial.println(cadence, 2);
+
+  return cadence;
+}
+
+// ---------------------------------------------------------------------
+// OPTIMALER GANG
+// ---------------------------------------------------------------------
+int getOptimalGear(float wheelSpeed, float slopePercent, float desiredCadence) {
+  if (slopePercent > 15.0)  slopePercent = 15.0;
+  if (slopePercent < -15.0) slopePercent = -15.0;
+
+  float adjustedCadence = desiredCadence + slopePercent;
+  if (adjustedCadence < 1.0) adjustedCadence = 1.0;
+
+  if (wheelSpeed <= 0 || adjustedCadence <= 0) {
+    Serial.println("[getOptimalGear] Stillstand oder ungueltig => kein Gangwechsel.");
+    return currentGear;
+  }
+
+  float optimalGearRatio = wheelSpeed / adjustedCadence; 
+  float smallestDelta     = FLT_MAX;
+  int   bestGear          = currentGear;
+
+  Serial.print("[getOptimalGear] wheelSpeed=");
+  Serial.print(wheelSpeed, 2);
+  Serial.print(" km/h, slopePercent=");
+  Serial.print(slopePercent, 1);
+  Serial.print("% => adjustedCadence=");
+  Serial.println(adjustedCadence, 2);
+
+  for (int g = 1; g <= totalGears; g++) {
+    float gRatio = (float)chainringTeeth / (float)getCassetteTeeth(g);
+    float delta  = fabs(optimalGearRatio - gRatio);
+    if (delta < smallestDelta) {
+      smallestDelta = delta;
+      bestGear = g;
+    }
+  }
+
+  Serial.print("[getOptimalGear] => bestGear=");
+  Serial.println(bestGear);
+  return bestGear;
+}
+
+// ---------------------------------------------------------------------
+// AUTO-SHIFT
+// ---------------------------------------------------------------------
+void autoShiftGears() {
+  float slopePerc = getCurrentTiltPercentage();
+  int newGear = getOptimalGear(wheelRPM, slopePerc, optimalCadence);
+  if (newGear == currentGear) {
+    return;
+  }
+
+  int diff = newGear - currentGear;
+  Serial.print("[autoShiftGears] currentGear=");
+  Serial.print(currentGear);
+  Serial.print(", newGear=");
+  Serial.print(newGear);
+  Serial.print(", diff=");
+  Serial.println(diff);
+
+  if (abs(diff) > maxGearJump) {
+    diff = (diff > 0) ? maxGearJump : -maxGearJump;
+    Serial.print("[autoShiftGears] diff gekappt auf ");
+    Serial.println(diff);
+  }
+
+  if (diff > 0) {
+    for (int i = 0; i < diff; i++) shiftUp();
+  } else {
+    for (int i = 0; i < abs(diff); i++) shiftDown();
+  }
+}
+
+// ---------------------------------------------------------------------
+// SHIFT-FUNKTIONEN => speichern aktuellen Gang ins EEPROM
+// ---------------------------------------------------------------------
+void shiftUp() {
+  if (currentGear < totalGears) {
+    float pf = getCassettePullFactor(currentGear);
+    currentGear++;
+    actuatorPositionMicros += pf * microsPerMm;
+    actuator.writeMicroseconds(actuatorPositionMicros);
+    delay(300);
+
+    // Gang speichern
+    storeEepromInt(EEPROM_ADDR_LAST_GEAR, currentGear);
+
+    Serial.print("[shiftUp] => newGear=");
+    Serial.print(currentGear);
+    Serial.print(", actuator=");
+    Serial.println(actuatorPositionMicros);
+  } else {
+    Serial.println("[shiftUp] bereits highest gear");
+  }
+}
+
+void shiftDown() {
+  if (currentGear > 1) {
+    int targetGear = currentGear - 1;
+    float pf = getCassettePullFactor(targetGear);
+    currentGear--;
+    actuatorPositionMicros -= pf * microsPerMm;
+    actuator.writeMicroseconds(actuatorPositionMicros);
+    delay(300);
+
+    // Gang speichern
+    storeEepromInt(EEPROM_ADDR_LAST_GEAR, currentGear);
+
+    Serial.print("[shiftDown] => newGear=");
+    Serial.print(currentGear);
+    Serial.print(", actuator=");
+    Serial.println(actuatorPositionMicros);
+  } else {
+    Serial.println("[shiftDown] bereits lowest gear");
+  }
+}
+
+// ---------------------------------------------------------------------
+// AKTUATOR-KALIBRIERUNG (rein mechanisch)
+// ---------------------------------------------------------------------
+void calibrateActuator() {
+  actuatorPositionMicros = actuatorMaxMicros;
+  actuator.writeMicroseconds(actuatorPositionMicros);
+  Serial.println("[calibrateActuator] auf max Position (mechanisch) gefahren.");
+}
+
+// ---------------------------------------------------------------------
+// AKTUATOR AUF GEWÜNSCHTEN GANG FAHREN
+// ---------------------------------------------------------------------
+void setActuatorToGear(int gear) {
+  if (gear < 1) gear = 1;
+  if (gear > totalGears) gear = totalGears;
+
+  float pfSum = 0.0;
+  // Wir summieren die Pull-Faktoren von Gang=1 bis gear-1
+  // oder verwenden Dein altes Schema:
+  // => Du hattest: actuatorMinMicros + 150 + (pf * microsPerMm * (gear-1))
+  //    Hier belassen wir es bei dem alten Rechenansatz:
+  float pf = 0.0;
+  for (int g = 1; g < gear; g++) {
+    pf += getCassettePullFactor(g);
+  }
+  actuatorPositionMicros = actuatorMinMicros + (pf * microsPerMm);
+
+  actuator.writeMicroseconds(actuatorPositionMicros);
+
+  currentGear = gear;
+  Serial.print("[setActuatorToGear] gear=");
+  Serial.print(gear);
+  Serial.print(" => actuatorMicros=");
+  Serial.println(actuatorPositionMicros);
+
+  // Letzten Gang ins EEPROM speichern
+  storeEepromInt(EEPROM_ADDR_LAST_GEAR, currentGear);
+}
+
+// ---------------------------------------------------------------------
+// EEPROM-Helfer
+// ---------------------------------------------------------------------
+void storeEepromFloat(int address, float value) {
+  EEPROM.put(address, value);
+}
+
+float readEepromFloat(int address) {
+  float val;
+  EEPROM.get(address, val);
+  if (isnan(val)) {
+    val = 0.0;
+  }
+  return val;
+}
+
+// Wir nehmen an, dass int auf dem Arduino 2 Byte hat.
+void storeEepromInt(int address, int value) {
+  EEPROM.put(address, value);
+}
+
+int readEepromInt(int address) {
+  int val;
+  EEPROM.get(address, val);
+  return val;
+}
+
+// ---------------------------------------------------------------------
+// AKKUSTAND
 // ---------------------------------------------------------------------
 float getBatteryPercentage() {
   int rawValue = analogRead(analogPinBattery);
@@ -692,17 +831,14 @@ float getBatteryPercentage() {
 
   float percentage = (batteryVoltage - minVoltage)
                    / (maxVoltage - minVoltage) * 100.0;
-
-  // Begrenzen
   if (percentage < 0.0)   percentage = 0.0;
   if (percentage > 100.0) percentage = 100.0;
 
-  // Debug
-  Serial.print("[getBatteryPercentage] rawValue: ");
+  Serial.print("[getBatteryPercentage] raw=");
   Serial.print(rawValue);
-  Serial.print(", voltageAtPin: ");
+  Serial.print(", pinVolt=");
   Serial.print(voltageAtPin, 2);
-  Serial.print(" V, batteryVoltage: ");
+  Serial.print(" V => battVolt=");
   Serial.print(batteryVoltage, 2);
   Serial.print(" V => ");
   Serial.print(percentage, 1);
@@ -722,18 +858,36 @@ void checkBatteryStatus() {
   Serial.println("%");
 
   if (battery >= 20.0 && battery < 45.0) {
-    blinkLED(255, 130, 0, 1, 300); // 1x Orange blinken
-    Serial.println("[checkBatteryStatus] Level: 20% - 45% (1x Orange Blink)");
+    blinkLED(255, 130, 0, 1, 300);
+    Serial.println("[checkBatteryStatus] Level: 20%-45% (1x Orange Blink)");
   } 
   else if (battery >= 45.0 && battery < 75.0) {
-    blinkLED(255, 130, 0, 2, 300); // 2x Orange blinken
-    Serial.println("[checkBatteryStatus] Level: 45% - 75% (2x Orange Blink)");
+    blinkLED(255, 130, 0, 2, 300);
+    Serial.println("[checkBatteryStatus] Level: 45%-75% (2x Orange Blink)");
   } 
   else if (battery >= 75.0 && battery <= 100.0) {
-    blinkLED(255, 130, 0, 3, 300); // 3x Orange blinken
-    Serial.println("[checkBatteryStatus] Level: 75% - 100% (3x Orange Blink)");
+    blinkLED(255, 130, 0, 3, 300);
+    Serial.println("[checkBatteryStatus] Level: 75%-100% (3x Orange Blink)");
   } 
   else if (battery < 20.0) {
-    Serial.println("[checkBatteryStatus] Kritischer Akkustand <20%! Keine Blinksignale.");
+    Serial.println("[checkBatteryStatus] Kritischer Akkustand <20%. Keine Blinksignale.");
+  }
+}
+
+// ---------------------------------------------------------------------
+// LED
+// ---------------------------------------------------------------------
+void setLED(int red, int green, int blue) {
+  analogWrite(redPin,   red);
+  analogWrite(greenPin, green);
+  analogWrite(bluePin,  blue);
+}
+
+void blinkLED(int red, int green, int blue, int times, int delayMs) {
+  for (int i = 0; i < times; i++) {
+    setLED(red, green, blue);
+    delay(delayMs);
+    setLED(0, 0, 0);
+    delay(delayMs);
   }
 }
