@@ -1,5 +1,3 @@
-
-
 // ---------------------------------------------------------------------
 // AUTOMATIC ELECTRICAL BICYCLE SHIFTING CODE (Extended Debug Version)
 //
@@ -131,6 +129,21 @@ int currentGear            = 11;
 int actuatorPositionMicros = 1000;
 int startingPositionMicros = 2000;
 
+// ----------------------------------------------------------------------------
+// Konfiguration für Tastendruck:
+// ----------------------------------------------------------------------------
+const unsigned long DEBOUNCE_DELAY    = 80;    // Mind. 80 ms für stabilen Button-Zustand
+const unsigned long DOUBLECLICK_MIN   = 100;   // 2. Klick muss mind. 100 ms nach dem 1. Klick kommen
+const unsigned long DOUBLECLICK_MAX   = 1200;  // und max. 1200 ms später
+const unsigned long LONGPRESS_TIME    = 3000;  // Ab 3 s gedrückt => long press (Moduswechsel)
+
+
+// Globale Variablen für den Button Press
+bool  g_lastPhysicalState   = HIGH;  // letzter gelesener Pin-Zustand
+bool  g_stableState         = HIGH;  // entprellter Stabil-Zustand
+unsigned long g_lastDebounceTime = 0;
+
+
 // ---------------------------------------------------------------------
 // TIMING & MODES
 // ---------------------------------------------------------------------
@@ -183,6 +196,7 @@ float forwardCalibrationAngleDeg = 0.0;  // in Grad
 // ---------------------------------------------------------------------
 void setLED(int red, int green, int blue);
 void blinkLED(int red, int green, int blue, int times, int delayMs);
+bool readDebouncedButton();
 void checkSetupButtonPress();
 void checkBatteryStatus();
 void calibrateActuator();
@@ -337,78 +351,134 @@ void loop() {
 }
 
 // ---------------------------------------------------------------------
+// READ DEBOUNCE BUTTON PRESS (Kurz/Lang, Doppelklick)
+// ---------------------------------------------------------------------
+
+bool readDebouncedButton() {
+  bool reading = digitalRead(calibrateButtonPin);  // true=HIGH, false=LOW
+  // Hat sich der physische Zustand geändert?
+  if (reading != g_lastPhysicalState) {
+    g_lastDebounceTime = millis();
+    g_lastPhysicalState = reading;
+  }
+
+  // Wenn die Änderung länger als DEBOUNCE_DELAY anliegt, übernehmen wir sie:
+  if ((millis() - g_lastDebounceTime) > DEBOUNCE_DELAY) {
+    g_stableState = g_lastPhysicalState;
+  }
+
+  // Wir interpretieren "Button gedrückt" als (LOW)
+  // => Daher return (g_stableState == LOW)
+  return (g_stableState == LOW);
+}
+
+
+
+
+// ---------------------------------------------------------------------
 // CHECK BUTTON PRESS (Kurz/Lang, Doppelklick)
 // ---------------------------------------------------------------------
 void checkSetupButtonPress() {
-  int buttonState = digitalRead(calibrateButtonPin);
+  // Lies den entprellten Zustand
+  bool pressed = readDebouncedButton();
 
-  // Doppelklick => Akkustatus
-  if (buttonState == LOW) {
-    unsigned long currentTime = millis();
-    if (isWaitingForSecondClick && (currentTime - lastButtonPressTime <= doubleClickInterval)) {
-      isWaitingForSecondClick = false;  
-      Serial.println("[checkSetupButtonPress] Doppelklick => Akku-Check");
-      checkBatteryStatus();             
-    } else {
-      isWaitingForSecondClick = true;
-      lastButtonPressTime = currentTime;
-    }
-  } else if (isWaitingForSecondClick) {
-    if (millis() - lastButtonPressTime > doubleClickInterval) {
-      isWaitingForSecondClick = false;
-    }
-  }
+  // Zeitvariable für diverse Checks
+  unsigned long now = millis();
 
-  // Langer Klick => Moduswechsel Setup <-> AutoShift
-  if (buttonState == LOW && buttonPressStartTime == 0) {
-    buttonPressStartTime = millis();
-  } 
-  else if (buttonState == LOW && millis() - buttonPressStartTime > 3000) {
-    // Modus umschalten
-    isSetupMode = !isSetupMode;
-    buttonPressStartTime = 0;
+  // STATICs / oder globale Variablen:
+  static bool  wasPressed = false;          // war der Button in der letzten Schleife gedrückt?
+  static bool  isWaitingForSecondClick = false;
+  static unsigned long firstClickTime  = 0; // Zeit des ersten Click-Events
+  static unsigned long pressStartTime  = 0; // Wann wurde gedrückt (für long-press)
 
-    if (isSetupMode) {
-      setLED(255, 0, 0);
-      Serial.println("[checkSetupButtonPress] Wechsel in Setup Mode");
+  // -------------------------------------------------------------
+  // LOGIK
+  
+  // 1) FALL: Button neu gedrückt (Flanke HIGH->LOW)
+  if (pressed && !wasPressed) {
+    // -> Start Press
+    pressStartTime = now; // Merke uns den Moment des Drückens
 
-      // Gang 11 erzwingen
-      currentGear = totalGears;
-      setActuatorToGear(currentGear);
-      Serial.println("[checkSetupButtonPress] Forced highest gear (11)");
+    // Prüfe, ob wir schon auf den zweiten Klick warten:
+    if (isWaitingForSecondClick) {
+      // => Wir haben also bereits 1 Klick
+      unsigned long dt = now - firstClickTime;
+      if (dt >= DOUBLECLICK_MIN && dt <= DOUBLECLICK_MAX) {
+        // ==> Gültiger 2. Klick => DoubleClick
+        Serial.println("[checkSetupButtonPress] *** DOPPELKLICK *** => checkBatteryStatus()");
+        checkBatteryStatus();
 
-    } else {
-      blinkLED(0, 255, 0, 3, 300);
-      Serial.println("[checkSetupButtonPress] Wechsel in Auto Shift Mode");
-
-      // Start-Gang erzwingen
-      if (startGearAuto >= 1 && startGearAuto <= totalGears) {
-        int diff = startGearAuto - currentGear;
-        if (diff > 0) {
-          for (int i = 0; i < diff; i++) shiftUp();
-        } else if (diff < 0) {
-          for (int i = 0; i < abs(diff); i++) shiftDown();
-        }
-      }
-    }
-  } 
-  else if (buttonState == HIGH && buttonPressStartTime > 0) {
-    unsigned long pressDuration = millis() - buttonPressStartTime;
-    if (pressDuration < 3000) {
-      // Kurzer Klick
-      if (isSetupMode) {
-        // => Forward-Kalibrierung starten (inkl. Gyro-Neukalibrierung)
-        Serial.println("[checkSetupButtonPress] Kurzer Klick im Setup Mode => calibrateForwardDirection()");
-        calibrateForwardDirection();
+        // Reset
+        isWaitingForSecondClick = false;
       } else {
-        // Im Auto-Shift-Mode => LED Blink => Status
-        blinkLED(0, 255, 0, 3, 300); 
-        Serial.println("[checkSetupButtonPress] Status: Auto Shift Mode (kurzer Klick).");
+        // Entweder zu schnell (< DOUBLECLICK_MIN) oder zu spät (> DOUBLECLICK_MAX)
+        // => Behandle es wie einen neuen "ersten Klick"
+        firstClickTime = now;
       }
+    } else {
+      // Noch keine Klick-Sequenz => Dies ist der 1. Klick
+      isWaitingForSecondClick = true;
+      firstClickTime = now;
     }
-    buttonPressStartTime = 0;
   }
+
+  // 2) FALL: Button wird gehalten (pressed == true)
+  if (pressed) {
+    // Prüfe Long-Press
+    if ((now - pressStartTime) > LONGPRESS_TIME) {
+      // => LONG PRESS => Moduswechsel
+      Serial.println("[checkSetupButtonPress] *** LONG PRESS *** => Moduswechsel!");
+      isSetupMode = !isSetupMode;
+      // Reset
+      isWaitingForSecondClick = false;
+
+      // Hier dein Code für Moduswechsel:
+      if (isSetupMode) {
+        setLED(255, 0, 0);
+        Serial.println("Setup Mode aktiviert ...");
+        // ...
+      } else {
+        blinkLED(0, 255, 0, 3, 300);
+        Serial.println("Auto Shift Mode aktiviert ...");
+        // ...
+      }
+
+      // Verhindere, dass wir nochmal weiter verarbeiten
+      pressStartTime = now;  // oder man kann wasPressed = true setzen
+    }
+  }
+  // 3) FALL: Button wurde losgelassen (Flanke LOW->HIGH)
+  else if (!pressed && wasPressed) {
+    // -> Button-Release
+    unsigned long pressDuration = now - pressStartTime;
+    // Hier machen wir erst mal nichts.
+    // SINGLE-KLICK-Auslösung wird erst bestätigt, wenn das Double-Click-Fenster abgelaufen ist.
+  }
+
+  // 4) TIMEOUT für Single-Klick
+  // Wenn wir auf zweiten Klick warten, aber die Zeit > DOUBLECLICK_MAX ist => Single-Click
+  if (isWaitingForSecondClick && ((now - firstClickTime) > DOUBLECLICK_MAX)) {
+    // => Single-Klick sicher
+    Serial.println("[checkSetupButtonPress] *** SINGLE KLICK *** erkannt.");
+
+    // Wenn wir im SetupMode sind:
+    if (isSetupMode) {
+      Serial.println("   => z.B. calibrateForwardDirection aufrufen ...");
+      // calibrateForwardDirection();
+      // oder was immer du machen willst
+    } else {
+      Serial.println("   => Auto-Shift-Mode: Eventueller Status-Blink, etc.");
+      blinkLED(0, 255, 0, 3, 300);
+    }
+
+    // Reset
+    isWaitingForSecondClick = false;
+  }
+
+  // 5) Merke uns den Zustand für die nächste Runde
+  wasPressed = pressed;
 }
+
 
 // ---------------------------------------------------------------------
 // FORWARD-KALIBRIERUNG: 5s Countdown + Gyro-Drift + 5s Schieben
